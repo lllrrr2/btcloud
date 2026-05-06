@@ -3,6 +3,19 @@ PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
 export PATH
 LANG=en_US.UTF-8
 
+MAC_OS_CHECK=$(uname -a|grep Darwin)
+if [ "${MAC_OS_CHECK}" ];then
+    echo "当前系统为macOS，无法安装宝塔面板，请使用Linux系统(服务器版本如Debian/Centos)安装宝塔面板"
+	echo "或使用Docker安装宝塔面板"
+    exit 1
+fi
+
+INSTALL_LOGFILE="/tmp/btpanel-install.log"
+if [ -f "$INSTALL_LOGFILE" ];then
+    rm -f $INSTALL_LOGFILE
+fi
+exec > >(tee -a "$INSTALL_LOGFILE") 2>&1 
+
 Btapi_Url='http://www.example.com'
 Check_Api=$(curl -Ss --connect-timeout 5 -m 2 $Btapi_Url/api/SetupCount)
 if [ "$Check_Api" != 'ok' ];then
@@ -138,6 +151,89 @@ panelPort=$(expr $RANDOM % 55535 + 10000)
 # 	IDC_CODE=$1
 # fi
 
+#2026-03-14新增下载共用函数
+Download_File(){
+	# 参数1：主下载域名（如http://download.bt.cn）
+	# 参数2：备用下载域名（如http://download.bt.com）
+	# 参数3：文件路径（如/src/file.tar.gz）
+	# 参数4：保存路径（如/tmp/file.tar.gz）
+	# 示例调用：Download_File "http://download.bt.cn" "http://download.bt.com" "/src/file.tar.gz" "/tmp/file.tar.gz"
+	# 智能下载函数，支持curl和wget，自动重试，验证文件大小，确保下载成功
+    local primary_domain=$1
+    local backup_domain=$2
+    local file_path=$3
+    local save_path=$4
+    
+    local max_retry=2
+	local connect_timeout=15
+    local timeout=20
+    local min_speed=60000
+    local retry_count=0
+    local download_success=0
+    local current_url=""
+    
+	
+    echo "正在下载: $(basename ${save_path})"
+    
+    while [ ${retry_count} -lt ${max_retry} ]; do
+        if [ -f "${save_path}" ]; then
+            rm -f "${save_path}"
+        fi
+        
+        if [ ${retry_count} -eq 0 ]; then
+            current_url="${primary_domain}${file_path}"
+            #echo "使用主下载节点: ${primary_domain}"
+        else
+            current_url="${backup_domain}${file_path}"
+            #echo "切换到备用下载节点: ${backup_domain}"
+        fi
+        
+        if command -v curl >/dev/null 2>&1; then
+            curl -fL --connect-timeout ${connect_timeout} --speed-limit ${min_speed} --speed-time 10 -o "${save_path}" "${current_url}"
+            if [ $? -eq 0 ] && [ -f "${save_path}" ]; then
+                file_size=$(du -b "${save_path}" 2>/dev/null | awk '{print $1}')
+                if [ "${file_size}" -gt 100 ]; then
+                    download_success=1
+                    break
+                fi
+            fi
+		elif command -v wget >/dev/null 2>&1; then
+            wget --connect-timeout=${connect_timeout} --read-timeout=10 --tries=1 --progress=bar:force -O "${save_path}" "${current_url}" 2>&1
+            if [ $? -eq 0 ] && [ -f "${save_path}" ]; then
+                file_size=$(du -b "${save_path}" 2>/dev/null | awk '{print $1}')
+                if [ "${file_size}" -gt 100 ]; then
+                    download_success=1
+                    break
+                fi
+            fi
+        else
+            echo "错误: 未找到curl或wget下载工具"
+            return 1
+        fi
+        
+        retry_count=$((retry_count + 1))
+        if [ ${retry_count} -lt ${max_retry} ]; then
+            echo "下载失败，${retry_count}/${max_retry} 次重试中..."
+            sleep 2
+        fi
+    done
+    
+    if [ ${download_success} -eq 0 ]; then
+        echo "错误: 下载失败，已重试 ${max_retry} 次"
+        #echo "主节点: ${primary_domain}${file_path}"
+        #echo "备用节点: ${backup_domain}${file_path}"
+        return 1
+    fi
+
+
+	if [ ${retry_count} -gt 0 ] && [ ${download_success} -eq 1 ]; then
+		download_Url=${backup_domain}
+	fi
+    
+    #echo "下载成功: $(basename ${save_path})"
+    return 0
+}
+
 Ready_Check(){
     WWW_DISK_SPACE=$(df |grep /www|awk '{print $4}')
     ROOT_DISK_SPACE=$(df |grep /$|awk '{print $4}')
@@ -186,6 +282,13 @@ GetSysInfo(){
 	MEM_TOTAL=$(free -m|grep Mem|awk '{print $2}')
 	CPU_INFO=$(getconf _NPROCESSORS_ONLN)
 
+
+	# if [ -f "/etc/apt/sources.list.d/ubuntu.sources" ];then
+	# 	cat /etc/apt/sources.list.d/ubuntu.sources
+	# 	apt-get update -y
+	# 	apt-get install unzip -y
+	# fi
+
 	echo -e ${SYS_VERSION}
 	echo -e Bit:${SYS_BIT} Mem:${MEM_TOTAL}M Core:${CPU_INFO}
 	echo -e ${SYS_INFO}
@@ -216,9 +319,22 @@ GetSysInfo(){
 
 	for tool in $CORE_TOOLS; do
 		if ! command -v "$tool" >/dev/null 2>&1; then
-			NO_EXIST_TOOL="$NO_EXIST_TOOL $tool"
+			if [ "${PM}" = "apt-get" ] && [ "$tool" = "xz" ]; then
+				NO_EXIST_TOOL="$NO_EXIST_TOOL xz-utils"
+			else
+				NO_EXIST_TOOL="$NO_EXIST_TOOL $tool"
+			fi
 		fi
 	done
+
+	if [ -n "$NO_EXIST_TOOL" ]; then
+		if [ "${PM}" = "yum" ]; then
+			yum install -y $NO_EXIST_TOOL
+		elif [ "${PM}" = "apt-get" ]; then
+			apt-get update -y
+			apt-get install -y $NO_EXIST_TOOL
+		fi
+	fi
 
 	if [ -n "$NO_EXIST_TOOL" ]; then
 		NO_EXIST_TOOL="${NO_EXIST_TOOL# }"
@@ -515,16 +631,16 @@ Set_Repo_Url(){
 		CN_CHECK=$(curl -sS --connect-timeout 10 -m 10 https://api.bt.cn/api/isCN)
 		if [ "${CN_CHECK}" == "True" ];then
 			SOURCE_URL_CHECK=$(grep -E 'security.ubuntu.com|archive.ubuntu.com|security.debian.org|deb.debian.org' /etc/apt/sources.list)
-			# if [ -f "/etc/apt/sources.list.d/ubuntu.sources" ];then
-			# 	SOURCE_URL_CHECK=$(grep -E 'security.ubuntu.com|archive.ubuntu.com|security.debian.org|deb.debian.org' /etc/apt/sources.list.d/ubuntu.sources)
-			# fi
+			if [ -f "/etc/apt/sources.list.d/ubuntu.sources" ];then
+				SOURCE_URL_CHECK=$(grep -E 'security.ubuntu.com|archive.ubuntu.com|security.debian.org|deb.debian.org' /etc/apt/sources.list.d/ubuntu.sources)
+			fi
 		fi
 
 		#GET_SOURCES_URL=$(cat /etc/apt/sources.list|grep ^deb|head -n 1|awk -F[/:] '{print $4}')
 		GET_SOURCES_URL=$(cat /etc/apt/sources.list|grep ^deb|head -n 1|sed -E 's|^[^ ]+ https?://([^/]+).*|\1|')
-		# if [ -f "/etc/apt/sources.list.d/ubuntu.sources" ];then
-		# 	GET_SOURCES_URL=$(cat /etc/apt/sources.list.d/ubuntu.sources|grep URIs:|head -n 1|sed -E 's|^[^ ]+ https?://([^/]+).*|\1|')
-		# fi
+		if [ -f "/etc/apt/sources.list.d/ubuntu.sources" ];then
+			GET_SOURCES_URL=$(cat /etc/apt/sources.list.d/ubuntu.sources|grep ^URIs:|head -n 1|sed -E 's|^[^ ]+ https?://([^/]+).*|\1|')
+		fi
 		NODE_CHECK=$(curl --connect-timeout 3 -m 3 2>/dev/null -w "%{http_code} %{time_total}" ${GET_SOURCES_URL} -o /dev/null)
 		NODE_STATUS=$(echo ${NODE_CHECK}|awk '{print $1}')
 		TIME_TOTAL=$(echo ${NODE_CHECK}|awk '{print $2 * 1000}'|cut -d '.' -f 1)
@@ -549,16 +665,22 @@ Set_Repo_Url(){
 							sed -i "s/security.debian.org/${list}/g" /etc/apt/sources.list
 							sed -i "s/deb.debian.org/${list}/g" /etc/apt/sources.list
 						fi
-						# if [ -f "/etc/apt/sources.list.d/ubuntu.sources" ];then
-						# 	\cp -rpa /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
-						# 	sed -i "s/${GET_SOURCES_URL}/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
-						# 	sed -i "s/cn.security.ubuntu.com/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
-						# 	sed -i "s/cn.archive.ubuntu.com/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
-						# 	sed -i "s/security.ubuntu.com/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
-						# 	sed -i "s/archive.ubuntu.com/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
-						# 	sed -i "s/security.debian.org/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
-						# 	sed -i "s/deb.debian.org/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
-						# fi
+						if [ -f "/etc/apt/sources.list.d/ubuntu.sources" ];then
+							\cp -rpa /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak
+							sed -i "s/${GET_SOURCES_URL}/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
+							sed -i "s/cn.security.ubuntu.com/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
+							sed -i "s/cn.archive.ubuntu.com/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
+							sed -i "s/security.ubuntu.com/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
+							sed -i "s/archive.ubuntu.com/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
+							sed -i "s/security.debian.org/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
+							sed -i "s/deb.debian.org/${list}/g" /etc/apt/sources.list.d/ubuntu.sources
+							sleep 3
+							apt-get update -y
+							if [ $? != "0" ];then
+								\cp -rpa /etc/apt/sources.list.d/ubuntu.sources.bak  /etc/apt/sources.list.d/ubuntu.sources
+								apt-get update -y
+						    fi 
+						fi
 						break;
 					fi
 				fi
@@ -747,20 +869,20 @@ get_node_url(){
 	
 	echo '---------------------------------------------';
 	echo "Selected download node...";
-	nodes=(https://dg2.bt.cn https://download.bt.cn https://ctcc1-node.bt.cn https://cmcc1-node.bt.cn https://ctcc2-node.bt.cn https://hk1-node.bt.cn https://na1-node.bt.cn https://jp1-node.bt.cn https://cf1-node.aapanel.com https://download.bt.cn http://115.231.130.125:5880);
+	nodes=(https://dg2.bt.cn https://download.bt.cn https://download-cdn1.bt.cn https://ctcc1-node.bt.cn https://cmcc1-node.bt.cn https://ctcc2-node.bt.cn https://hk1-node.bt.cn https://na1-node.bt.cn https://jp1-node.bt.cn https://cf1-node.aapanel.com https://download-cdn1.bt.cn);
 	
 	CURL_CHECK=$(which curl)
 	if [ "$?" == "0" ];then
 		CN_CHECK=$(curl -sS --connect-timeout 10 -m 10 https://api.bt.cn/api/isCN)
 		if [ "${CN_CHECK}" == "True" ];then
-			nodes=(https://dg2.bt.cn https://download.bt.cn https://ctcc1-node.bt.cn https://cmcc1-node.bt.cn https://ctcc2-node.bt.cn https://hk1-node.bt.cn http://115.231.130.125:5880);
+			nodes=(https://dg2.bt.cn https://download.bt.cn https://download-cdn1.bt.cn https://ctcc1-node.bt.cn https://cmcc1-node.bt.cn http://download-cdn1.bt.cn https://ctcc2-node.bt.cn https://hk1-node.bt.cn);
 		else
 			PING6_CHECK=$(ping6 -c 2 -W 2 download.bt.cn &> /dev/null && echo "yes" || echo "no")
 			if [ "${PING6_CHECK}" == "yes" ];then
-				nodes=(https://dg2.bt.cn https://download.bt.cn https://cf1-node.aapanel.com);
+				nodes=(https://dg2.bt.cn https://download.bt.cn https://cf1-node.aapanel.com https://download-cdn1.bt.cn);
 			else
 				#nodes=(https://cf1-node.aapanel.com https://download.bt.cn https://na1-node.bt.cn https://jp1-node.bt.cn https://dg2.bt.cn);
-				nodes=(https://cf1-node.aapanel.com https://cf1-node.aapanel.com https://download.bt.cn https://dg2.bt.cn https://jp1-node.bt.cn);
+				nodes=(https://cf1-node.aapanel.com https://cf1-node.aapanel.com https://jp1-node.bt.cn https://download.bt.cn https://dg2.bt.cn https://download-cdn1.bt.cn);
 			fi
 		fi
 	fi
@@ -1017,7 +1139,7 @@ Get_Versions(){
 			os_type="opencloudos"
 			os_version="9"
 			pyenv_tt="true"
-		elif { [ "${ID}" == "almalinux" ] || [ "${ID}" == "centos" ] || [ "${ID}" == "rocky" ]; } && [[ "${OS_V}" =~ ^(9)$ ]]; then
+		elif { [ "${ID}" == "almalinux" ] || [ "${ID}" == "centos" ] || [ "${ID}" == "rocky" ]; } && [[ "${OS_V}" =~ ^(9|10)$ ]]; then
 			os_type="el"
 			os_version="9"
 			pyenv_tt="true"
@@ -1203,6 +1325,7 @@ EOF
 	echo "==============================================="
 	if [ "${os_version}" != "" ];then
 		pyenv_file="/www/pyenv.tar.gz"
+		#Download_File ${download_Url} ${backup_Url} "/install/pyenv/pyenv-${os_type}${os_version}-x${is64bit}.tar.gz" $pyenv_file
 		wget -O $pyenv_file $download_Url/install/pyenv/pyenv-${os_type}${os_version}-x${is64bit}.tar.gz -T 20
 		if [ "$?" != "0" ];then
 			get_node_url $download_Url
@@ -1255,8 +1378,8 @@ EOF
 	fi
 	cd ~
 	rm -rf $python_src_path
-	wget -O $pyenv_path/pyenv/bin/activate $download_Url/install/pyenv/activate.panel -T 5
-	wget -O $pyenv_path/pyenv/pip.txt $download_Url/install/pyenv/pip-3.7.16.txt -T 5
+	wget -O $pyenv_path/pyenv/bin/activate $download_Url/install/pyenv/activate.panel -T 20
+	wget -O $pyenv_path/pyenv/pip.txt $download_Url/install/pyenv/pip-3.7.16.txt -T 20
 	ln -sf $pyenv_path/pyenv/bin/pip3.7 $pyenv_path/pyenv/bin/pip
 	ln -sf $pyenv_path/pyenv/bin/python3.7 $pyenv_path/pyenv/bin/python
 	ln -sf $pyenv_path/pyenv/bin/pip3.7 /usr/bin/btpip
@@ -1425,6 +1548,12 @@ Install_Bt(){
 	if [ ! -f /www/server/panel/data/not_workorder.pl ]; then
 		echo "True" > /www/server/panel/data/not_workorder.pl
 	fi
+	if [ ! -f /www/server/panel/data/not_panelai.pl ]; then
+		echo "True" > /www/server/panel/data/not_panelai.pl
+	fi
+	if [ ! -f /www/server/panel/data/not_evaluate.pl ]; then
+		echo "True" > /www/server/panel/data/not_evaluate.pl
+	fi
 	if [ ! -f /www/server/panel/data/userInfo.json ]; then
 		echo "{\"uid\":1,\"username\":\"Administrator\",\"address\":\"127.0.0.1\",\"access_key\":\"test\",\"secret_key\":\"123456\",\"ukey\":\"123456\",\"state\":1}" > /www/server/panel/data/userInfo.json
 	fi
@@ -1464,7 +1593,8 @@ Set_Bt_Panel(){
 		echo "/${auth_path}" > ${admin_auth}
 	fi
 
-	btpip install asn1crypto==1.5.1 cbor2==5.4.6
+	btpip install asn1crypto==1.5.1 cbor2==5.4.6 
+	btpip install openai==1.39.0 numpy==1.21.6
 	if [ ! -f "/www/server/panel/pyenv/n.pl" ];then
 		btpip install docxtpl==0.16.7
 		/www/server/panel/pyenv/bin/pip3 install pymongo
@@ -1528,7 +1658,7 @@ Set_Bt_Panel(){
 		sleep 5
 		isStart=$(ps -ef|grep /www/server/panel/BT-Panel|grep -v grep)
 		if [ -z "${isStart}" ];then
-			/etc/init.d/bt 22
+			#/etc/init.d/bt 22
 			cd /www/server/panel/pyenv/bin
 			touch t.pl
 			ls -al python3.7 python
@@ -1798,7 +1928,7 @@ Install_Main(){
 
     Check_Ip_Cert_Async
 	Setup_Count ${IDC_CODE}
-	Add_lib_Install
+	#Add_lib_Install
 }
 
 echo "

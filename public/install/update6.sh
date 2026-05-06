@@ -220,6 +220,7 @@ fi
 btpip uninstall enum34 -y
 
 btpip install asn1crypto==1.5.1 cbor2==5.4.6
+btpip install openai==1.39.0 numpy==1.21.6
 
 GEOIP_C=$(echo $pip_list|grep geoip2)
 if [ -z "${GEOIP_C}" ];then
@@ -239,11 +240,11 @@ fi
 echo "修复面板依赖完成！"
 echo "==========================================="
 
-echo "安装基础网站流量统计程序..."
+# echo "安装基础网站流量统计程序..."
 wget -O site_new_total.sh ${download_Url}/site_total/install.sh &> /dev/null 
 bash site_new_total.sh &> /dev/null
 rm -f site_new_total.sh
-echo "安装基础网站流量统计程序完成"
+# echo "安装基础网站流量统计程序完成"
 
 
 RE_UPDATE=$(cat /www/server/panel/data/db/update)
@@ -262,6 +263,12 @@ fi
 rm -f /www/server/panel/class/*.so
 if [ ! -f /www/server/panel/data/not_workorder.pl ]; then
 	echo "True" > /www/server/panel/data/not_workorder.pl
+fi
+if [ ! -f /www/server/panel/data/not_panelai.pl ]; then
+	echo "True" > /www/server/panel/data/not_panelai.pl
+fi
+if [ ! -f /www/server/panel/data/not_evaluate.pl ]; then
+	echo "True" > /www/server/panel/data/not_evaluate.pl
 fi
 if [ ! -f /www/server/panel/data/userInfo.json ]; then
 	echo "{\"uid\":1,\"username\":\"Administrator\",\"address\":\"127.0.0.1\",\"access_key\":\"test\",\"secret_key\":\"123456\",\"ukey\":\"123456\",\"state\":1}" > /www/server/panel/data/userInfo.json

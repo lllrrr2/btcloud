@@ -62,6 +62,8 @@ Route::group('api', function () {
     Route::post('/Auth/GetSSLList', 'api/get_ssl_list');
     Route::post('/Cert/get_order_list', 'api/return_empty_array');
     Route::post('/Cert/get_product_list', 'api/return_success');
+    Route::post('/Cert/get_product_list_v3', 'api/return_success');
+    Route::post('/Cert/get_bt_ssl_list', 'api/return_empty_array');
     Route::get('/Pluginother/get_file', 'api/download_plugin_other');
     Route::get('/isCN', 'api/check_cnip');
 

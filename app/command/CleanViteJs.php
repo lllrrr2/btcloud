@@ -231,7 +231,13 @@ class CleanViteJs extends Command
             $code = $this->getExtendCode($file, '"购买商业证书"', 2);
             if($code){
                 $code2 = str_replace('"busSslList"', '"letsEncryptList"', $code);
-                $code2 = str_replace($this->getExtendFunction($code, '"购买商业证书"'), '', $code2);
+                if (strpos($code2, 'callback:()=>{') !== false && preg_match('!callback:\(\)=>\{(.*?)\}!', $code2, $matches)) {
+                    $code2 = str_replace($this->getExtendFunction($code, '"购买商业证书"'), $matches[1], $code2);
+                } elseif (strpos($code2, 'callback:function(){') !== false && preg_match('!callback:function\(\)\{(.*?)\}!', $code2, $matches)) {
+                    $code2 = str_replace($this->getExtendFunction($code, '"购买商业证书"'), $matches[1], $code2);
+                } else {
+                    $code2 = str_replace($this->getExtendFunction($code, '"购买商业证书"'), '', $code2);
+                }
                 $file = str_replace($code, $code2, $file);
             }
             $file = str_replace('.value="busSslList"', '.value="letsEncryptList"', $file);
